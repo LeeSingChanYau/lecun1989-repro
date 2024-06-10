@@ -1,7 +1,7 @@
 """
 Preprocess today's MNIST dataset into 1989 version's size/format (approximately)
 http://yann.lecun.com/exdb/publis/pdf/lecun-89e.pdf
-
+LOl
 Some relevant notes for this part:
 - 7291 digits are used for training
 - 2007 digits are used for testing
