@@ -3,6 +3,7 @@ Running this script eventually gives:
 23
 eval: split train. loss 4.073383e-03. error 0.62%. misses: 45
 eval: split test . loss 2.838382e-02. error 4.09%. misses: 82
+Ha
 """
 
 import os
