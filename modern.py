@@ -61,16 +61,21 @@ class Net(nn.Module):
     def __init__(self):
         super().__init__()
 
+        def kaiming_init(fan_in, *shape):
+            std = (2.0 / fan_in)**0.5  
+            return torch.randn(shape) * std
+
         # initialization as described in the paper to my best ability, but it doesn't look right...
-        winit = lambda fan_in, *shape: (torch.rand(*shape) - 0.5) * 2 * 2.4 / fan_in**0.5
+        # self.weight = torch.randn((fan_in, fan_out)) / fan_in**0.5 # note: kaiming init
+        # winit = lambda fan_in, *shape: (torch.rand(*shape) - 0.5) * 2 * 2.4 / fan_in**0.5
         macs = 0 # keep track of MACs (multiply accumulates)
         acts = 0 # keep track of number of activations
 
         # H1 layer parameters and their initialization
-        self.H1w = nn.Parameter(winit(5*5*1, 12, 1, 5, 5))
-        self.H1b = nn.Parameter(torch.zeros(12, 8, 8)) # presumably init to zero for biases
-        macs += (5*5*1) * (8*8) * 12
-        acts += (8*8) * 12
+        self.H1w = nn.Parameter(kaiming_init(5*5*1, 24, 1, 5, 5))
+        self.H1b = nn.Parameter(torch.zeros(24, 8, 8)) # presumably init to zero for biases
+        macs += (5*5*1) * (8*8) * 24
+        acts += (8*8) * 24
 
         # H2 layer parameters and their initialization
         """
@@ -79,22 +84,28 @@ class Net(nn.Module):
         to differently overlapping groups of 8/12 input planes. We will implement this with 3
         separate convolutions that we concatenate the results of.
         """
-        self.H2w = nn.Parameter(winit(5*5*8, 12, 8, 5, 5))
-        self.H2b = nn.Parameter(torch.zeros(12, 4, 4)) # presumably init to zero for biases
-        macs += (5*5*8) * (4*4) * 12
-        acts += (4*4) * 12
+        self.H2w = nn.Parameter(kaiming_init(5*5*24, 24, 24, 5, 5))  # Assuming input and output channels are now 24
+        self.H2b = nn.Parameter(torch.zeros(24, 4, 4))  # Adjust the size if the output dimension changes due to stride/padding
+        macs += (5*5*24) * (4*4) * 24
+        acts += (4*4) * 24
 
-        # H3 is a fully connected layer
-        self.H3w = nn.Parameter(winit(4*4*12, 4*4*12, 30))
-        self.H3b = nn.Parameter(torch.zeros(30))
-        macs += (4*4*12) * 30
+        # New H3w
+        self.H3w = nn.Parameter(kaiming_init(5*5*24, 24, 24, 5, 5))  # Assuming input and output channels are now 24
+        self.H3b = nn.Parameter(torch.zeros(24, 4, 4))  # Adjust the size if the output dimension changes due to stride/padding
+        macs += (5*5*24) * (4*4) * 24
+        acts += (4*4) * 24
+        
+        # H4 is a fully connected layer
+        self.H4w = nn.Parameter(kaiming_init(4*4*24, 4*4*24, 30))  # Adjust based on actual output size from H3
+        self.H4b = nn.Parameter(torch.zeros(30))
+        macs += (4*4*24) * 30
         acts += 30
 
         # output layer is also fully connected layer
-        self.outw = nn.Parameter(winit(30, 30, 10))
-        self.outb = nn.Parameter(torch.zeros(10))
-        macs += 30 * 10
-        acts += 10
+        self.outw = nn.Parameter(kaiming_init(30, 30, 62))
+        self.outb = nn.Parameter(torch.zeros(62))
+        macs += 30 * 62                 # (input_features * output_features)
+        acts += 62
 
         self.macs = macs
         self.acts = acts
@@ -112,23 +123,25 @@ class Net(nn.Module):
         x = torch.relu(x)
 
         # x is now shape (1, 12, 8, 8)
-        x = F.pad(x, (2, 2, 2, 2), 'constant', -1.0) # pad by two using constant -1 for background
-        slice1 = F.conv2d(x[:, 0:8], self.H2w[0:4], stride=2) # first 4 planes look at first 8 input planes
-        slice2 = F.conv2d(x[:, 4:12], self.H2w[4:8], stride=2) # next 4 planes look at last 8 input planes
-        slice3 = F.conv2d(torch.cat((x[:, 0:4], x[:, 8:12]), dim=1), self.H2w[8:12], stride=2) # last 4 planes are cross
-        x = torch.cat((slice1, slice2, slice3), dim=1) + self.H2b
+        x = F.pad(x, (2, 2, 2, 2), 'constant', -1.0)
+        x = F.conv2d(x, self.H2w, stride=2) + self.H2b
         x = torch.relu(x)
+
+        # New H3 convolutional layer
+        x = F.pad(x, (1, 1, 1, 1), 'constant', -1.0)  # Appropriate padding for the 3x3 kernel
+        x = F.conv2d(x, self.H3w, padding=1, stride=1)  + self.H3b  # No stride specified, adjust if needed
+        x = torch.relu(x)
+        
         x = F.dropout(x, p=0.25, training=self.training)
-
-        # x is now shape (1, 12, 4, 4)
-        x = x.flatten(start_dim=1) # (1, 12*4*4)
-        x = x @ self.H3w + self.H3b
+    
+        x = x.flatten(start_dim=1)  # Flattening the tensor for fully connected layer
+        
+        # First fully connected layer (previously H3, now H4)
+        x = x @ self.H4w + self.H4b
         x = torch.relu(x)
-
-        # x is now shape (1, 30)
+    
         x = x @ self.outw + self.outb
 
-         # x is finally shape (1, 10)
         return x
 
 # -----------------------------------------------------------------------------
@@ -160,8 +173,8 @@ if __name__ == '__main__':
     print("# activations: ", model.acts)
 
     # init data
-    Xtr, Ytr = torch.load('train1989.pt')
-    Xte, Yte = torch.load('test1989.pt')
+    Xtr, Ytr = torch.load('emnist_train1989.pt')
+    Xte, Yte = torch.load('emnist_test1989.pt')
 
     # init optimizer
     optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate)
@@ -207,4 +220,4 @@ if __name__ == '__main__':
         eval_split('test')
 
     # save final model to file
-    torch.save(model.state_dict(), os.path.join(args.output_dir, 'model.pt'))
+    torch.save(model.state_dict(), os.path.join(args.output_dir, 'model-alan.pt'))
